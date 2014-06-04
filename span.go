@@ -66,6 +66,7 @@ func connHandler(id int, outAddrs chan<- []*btc.NetAddress, outNode chan<- Node,
 		}
 		threadLog(INFO, "Connected")
 
+                // TODO notice block height
 		ver_m, _ := btc.NewMsgVersionFromConn(conn, genNonce(), 258823)
 		ver_m.AddUserAgent("btcmonitor", "0.0.1")
 		write(conn, ver_m)
