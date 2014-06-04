@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	btc "github.com/conformal/btcwire"
@@ -38,6 +39,8 @@ var logger = log.New(os.Stdout, "", log.Ltime)
 
 var outFile = flag.String("o", "run.json", "File to dump json into")
 var runTime = flag.Int("runtime", 60, "The runtime of the script")
+var bootstrap = flag.String("host", "127.0.0.1:18333", "The initial machine to bootstrap into the network")
+var mainnetFlag = flag.Bool("mainnet", false, "Use Mainnet?")
 
 func connHandler(id int, outAddrs chan<- []*btc.NetAddress, outNode chan<- Node, inAddr <-chan *btc.NetAddress) {
 	// A worker that deals with the connection to a single bitcoin node.
@@ -105,19 +108,23 @@ func connHandler(id int, outAddrs chan<- []*btc.NetAddress, outNode chan<- Node,
 }
 
 func init() {
+	flag.BoolVar(mainnetFlag, "M", false, "")
 	flag.IntVar(runTime, "r", 60, "")
 	flag.Usage = usage
 }
 
 func main() {
 	flag.Parse()
+	if *mainnetFlag {
+		btcnet = btc.MainNet
+	}
 
 	var addrMap = make(map[string]Node)
 
 	numWorkers := 250
 	// Multiplex writes into single channel
 	var incomingAddrs = make(chan []*btc.NetAddress)
-	var outgoingAddr = make(chan *btc.NetAddress, 10000000)
+	var outgoingAddr = make(chan *btc.NetAddress, 5000000)
 	var liveNodes = make(chan Node)
 
 	for i := 0; i < numWorkers; i += 1 {
@@ -132,8 +139,10 @@ func main() {
 	cnt := 0
 
 	// Initial connection into net
-	ip, port := "127.0.0.1", uint16(18333)
-	home := btc.NetAddress{time.Now(), *new(btc.ServiceFlag), net.ParseIP(ip), port}
+	pair := strings.Split(*bootstrap, ":")
+	ip := pair[0]
+	port, _ := strconv.ParseUint(pair[1], 10, 16)
+	home := btc.NetAddress{time.Now(), *new(btc.ServiceFlag), net.ParseIP(ip), uint16(port)}
 	// Give first goroutine something to do :)
 	outgoingAddr <- &home
 
