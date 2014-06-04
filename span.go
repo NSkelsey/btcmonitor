@@ -14,9 +14,8 @@ import (
 	btc "github.com/conformal/btcwire"
 )
 
-var btcnet = btc.TestNet3
+var btcnet = btc.MainNet
 var pver = btc.ProtocolVersion
-var debug = false
 
 type Node struct {
 	Addr      btc.NetAddress
@@ -55,6 +54,7 @@ func connHandler(id int, outAddrs chan<- []*btc.NetAddress, outNode chan<- Node,
 				logger.Printf("[%d] %s: %s\n", id, strA, msg)
 			}
 		}
+		write := composeWrite(threadLog)
 
 		conn, err := net.DialTimeout("tcp", strA, time.Millisecond*500)
 		if err != nil {
@@ -67,8 +67,9 @@ func connHandler(id int, outAddrs chan<- []*btc.NetAddress, outNode chan<- Node,
 		ver_m.AddUserAgent("btcmonitor", "0.0.1")
 		write(conn, ver_m)
 
-		// We are looking successful addr messages
+		// We are looking for successful addr messages
 		wins := 0
+		// After 6 seconds we just close the conn and handle errors
 		time.AfterFunc(time.Second*6, func() { conn.Close() })
 	MessageLoop:
 		for {
@@ -90,7 +91,6 @@ func connHandler(id int, outAddrs chan<- []*btc.NetAddress, outNode chan<- Node,
 			case *btc.MsgAddr:
 				wins += 1
 				addrs := resp.AddrList
-				log.Println(len(addrs))
 				outAddrs <- addrs
 				if wins == 3 {
 					break MessageLoop
@@ -177,12 +177,13 @@ func key(node Node) string {
 	return addressFmt(node.Addr)
 }
 
-func write(conn net.Conn, msg btc.Message) {
-	var btcnet = btc.TestNet3
-	var pver = btc.ProtocolVersion
-	err := btc.WriteMessage(conn, msg, pver, btcnet)
-	if err != nil {
-		println("Could not write for reason: ", err)
+func composeWrite(threadLog func(LogLevel, string)) func(net.Conn, btc.Message) {
+	// creates a write function with logging in a closure
+	return func(conn net.Conn, msg btc.Message) {
+		err := btc.WriteMessage(conn, msg, pver, btcnet)
+		if err != nil {
+			threadLog(INFO, err.Error())
+		}
 	}
 }
 
