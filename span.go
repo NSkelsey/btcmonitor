@@ -14,7 +14,7 @@ import (
 	btc "github.com/conformal/btcwire"
 )
 
-var btcnet = btc.MainNet
+var btcnet = btc.TestNet3
 var pver = btc.ProtocolVersion
 
 type Node struct {
@@ -36,7 +36,7 @@ const (
 var LEVEL = INFO
 var logger = log.New(os.Stdout, "", log.Ltime)
 
-var outFlag = flag.String("o", "run.json", "File to dump json into")
+var outFile = flag.String("o", "run.json", "File to dump json into")
 var runTime = flag.Int("runtime", 60, "The runtime of the script")
 
 func connHandler(id int, outAddrs chan<- []*btc.NetAddress, outNode chan<- Node, inAddr <-chan *btc.NetAddress) {
@@ -70,7 +70,7 @@ func connHandler(id int, outAddrs chan<- []*btc.NetAddress, outNode chan<- Node,
 		// We are looking for successful addr messages
 		wins := 0
 		// After 6 seconds we just close the conn and handle errors
-		time.AfterFunc(time.Second*6, func() { conn.Close() })
+		time.AfterFunc(time.Second*15, func() { conn.Close() })
 	MessageLoop:
 		for {
 			var resp btc.Message
@@ -82,7 +82,7 @@ func connHandler(id int, outAddrs chan<- []*btc.NetAddress, outNode chan<- Node,
 			threadLog(INFO, resp.Command())
 			switch resp := resp.(type) {
 			case *btc.MsgVersion:
-				node := conv_to_node(*addr, *resp)
+				node := convNode(*addr, *resp)
 				outNode <- node
 				verack := btc.NewMsgVerAck()
 				write(conn, verack)
@@ -92,7 +92,7 @@ func connHandler(id int, outAddrs chan<- []*btc.NetAddress, outNode chan<- Node,
 				wins += 1
 				addrs := resp.AddrList
 				outAddrs <- addrs
-				if wins == 3 {
+				if wins == 1 {
 					break MessageLoop
 				}
 			case *btc.MsgPing:
@@ -114,12 +114,13 @@ func main() {
 
 	var addrMap = make(map[string]Node)
 
+	numWorkers := 250
 	// Multiplex writes into single channel
-	var incomingAddrs = make(chan []*btc.NetAddress, 1000)
-	var outgoingAddr = make(chan *btc.NetAddress, 10000)
+	var incomingAddrs = make(chan []*btc.NetAddress)
+	var outgoingAddr = make(chan *btc.NetAddress, 10000000)
 	var liveNodes = make(chan Node)
 
-	for i := 0; i < 150; i += 1 {
+	for i := 0; i < numWorkers; i += 1 {
 		go connHandler(i, incomingAddrs, liveNodes, outgoingAddr)
 	}
 
@@ -156,13 +157,12 @@ MainLoop:
 		case node = <-liveNodes:
 			addrMap[key(node)] = node
 		case <-timer.C:
-			close(outgoingAddr)
 			fmt.Printf("Run Summary:\nNodes responding: %d\nNodes buffered: %d\nNodes visited: %d\n", len(addrMap), cnt, len(visited))
 			outs := ""
 			for addrStr, node := range addrMap {
 				outs += addrStr + " " + node.UserAgent + "\n"
 			}
-			ioutil.WriteFile(*outFlag, []byte(outs), 0644)
+			ioutil.WriteFile(*outFile, []byte(outs), 0644)
 			break MainLoop
 		}
 	}
@@ -187,7 +187,7 @@ func composeWrite(threadLog func(LogLevel, string)) func(net.Conn, btc.Message) 
 	}
 }
 
-func conv_to_node(addr btc.NetAddress, ver btc.MsgVersion) Node {
+func convNode(addr btc.NetAddress, ver btc.MsgVersion) Node {
 	n := Node{addr,
 		ver.ProtocolVersion,
 		ver.UserAgent,
