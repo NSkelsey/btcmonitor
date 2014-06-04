@@ -1,10 +1,13 @@
 package main
 
 import (
+	"flag"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"math/rand"
 	"net"
+	"os"
 	"strconv"
 	"time"
 
@@ -22,35 +25,60 @@ type Node struct {
 	Services  btc.ServiceFlag
 }
 
+type LogLevel int
+
+const (
+	ERROR LogLevel = iota
+	WARN
+	INFO
+	LOG
+)
+
+var LEVEL = INFO
+var logger = log.New(os.Stdout, "", log.Ltime)
+
+var outFlag = flag.String("o", "run.json", "File to dump json into")
+var runTime = flag.Int("runtime", 60, "The runtime of the script")
+
 func connHandler(id int, outAddrs chan<- []*btc.NetAddress, outNode chan<- Node, inAddr <-chan *btc.NetAddress) {
-	// A worker that deals with the connection to a single bitcoin node,
-	// writes the list of nodes reported by node into out
-	// writes a valid node into outNode
+	// A worker that deals with the connection to a single bitcoin node.
+	// It writes the list of nodes reported by node into out.
+	// It also writes a valid node into outNode.
+	// It reads from inAddr everytime it closes a connection
 
 	for {
 		addr := <-inAddr
-
 		strA := addressFmt(*addr)
-		conn, err := net.Dial("tcp", strA)
-		log.Printf("[%d] Dialed: %s\n", id, strA)
-		if err != nil {
-			log.Printf("FAILED: %s: %s\n", strA, err)
-			break
+
+		threadLog := func(level LogLevel, msg string) {
+			if level <= LEVEL {
+				logger.Printf("[%d] %s: %s\n", id, strA, msg)
+			}
 		}
 
+		conn, err := net.DialTimeout("tcp", strA, time.Millisecond*500)
+		if err != nil {
+			threadLog(LOG, err.Error())
+			continue
+		}
+		threadLog(INFO, "Connected")
+
 		ver_m, _ := btc.NewMsgVersionFromConn(conn, genNonce(), 258823)
-		ver_m.AddUserAgent("nodesearch", "0.0.1")
+		ver_m.AddUserAgent("btcmonitor", "0.0.1")
 		write(conn, ver_m)
 
+		// We are looking successful addr messages
+		wins := 0
 		time.AfterFunc(time.Second*6, func() { conn.Close() })
+	MessageLoop:
 		for {
 			var resp btc.Message
 			resp, _, err := btc.ReadMessage(conn, pver, btcnet)
 			if err != nil {
-				log.Printf("FAILED: %s: %s\n", strA, err)
-				break
+				threadLog(LOG, err.Error())
+				break MessageLoop
 			}
-			log.Println(resp.Command())
+			threadLog(INFO, resp.Command())
 			switch resp := resp.(type) {
 			case *btc.MsgVersion:
 				node := conv_to_node(*addr, *resp)
@@ -60,10 +88,13 @@ func connHandler(id int, outAddrs chan<- []*btc.NetAddress, outNode chan<- Node,
 				getAddr := btc.NewMsgGetAddr()
 				write(conn, getAddr)
 			case *btc.MsgAddr:
+				wins += 1
 				addrs := resp.AddrList
 				log.Println(len(addrs))
 				outAddrs <- addrs
-				break
+				if wins == 3 {
+					break MessageLoop
+				}
 			case *btc.MsgPing:
 				nonce := resp.Nonce
 				pong := btc.NewMsgPong(nonce)
@@ -73,7 +104,13 @@ func connHandler(id int, outAddrs chan<- []*btc.NetAddress, outNode chan<- Node,
 	}
 }
 
+func init() {
+	flag.IntVar(runTime, "r", 60, "")
+	flag.Usage = usage
+}
+
 func main() {
+	flag.Parse()
 
 	var addrMap = make(map[string]Node)
 
@@ -82,27 +119,31 @@ func main() {
 	var outgoingAddr = make(chan *btc.NetAddress, 10000)
 	var liveNodes = make(chan Node)
 
-	for i := 0; i < 50; i += 1 {
+	for i := 0; i < 150; i += 1 {
 		go connHandler(i, incomingAddrs, liveNodes, outgoingAddr)
 	}
 
-	timer := time.NewTimer(time.Second * 30)
+	rt := time.Duration(*runTime)
+	timer := time.NewTimer(time.Second * rt)
 	var visited = make(map[string]bool)
 	var addrs []*btc.NetAddress
 	var node Node
 	cnt := 0
 
 	// Initial connection into net
-	ip, port := "54.83.28.75", uint16(18333)
+	ip, port := "127.0.0.1", uint16(18333)
 	home := btc.NetAddress{time.Now(), *new(btc.ServiceFlag), net.ParseIP(ip), port}
 	// Give first goroutine something to do :)
 	outgoingAddr <- &home
 
-L3:
+MainLoop:
 	for {
+		// This select statement does one of 3 things:
+		// [1] Receives lists of addresses to search and hands them off to connection workers
+		// [2] Receives responding nodes from child workers
+		// [3] Times out execution of the script and cleans up
 		select {
 		case addrs = <-incomingAddrs:
-			//fmt.Println(len(addrs))
 			for i := range addrs {
 				addr := addrs[i]
 				key := addressFmt(*addr)
@@ -116,9 +157,13 @@ L3:
 			addrMap[key(node)] = node
 		case <-timer.C:
 			close(outgoingAddr)
-			i := 0
-			fmt.Printf("Run Summary:\nNodes alive: %d\nNodes buffered: %d\nNodes queued: %d\n", len(addrMap), cnt, i)
-			break L3
+			fmt.Printf("Run Summary:\nNodes responding: %d\nNodes buffered: %d\nNodes visited: %d\n", len(addrMap), cnt, len(visited))
+			outs := ""
+			for addrStr, node := range addrMap {
+				outs += addrStr + " " + node.UserAgent + "\n"
+			}
+			ioutil.WriteFile(*outFlag, []byte(outs), 0644)
+			break MainLoop
 		}
 	}
 }
@@ -152,4 +197,10 @@ func conv_to_node(addr btc.NetAddress, ver btc.MsgVersion) Node {
 
 func genNonce() uint64 {
 	return uint64(rand.Int63())
+}
+
+func usage() {
+	fmt.Fprintf(os.Stderr, "usage: span [filename]\n")
+	flag.PrintDefaults()
+	os.Exit(2)
 }
