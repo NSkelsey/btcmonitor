@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
-	"math/rand"
 	"net"
 	"os"
 	"strconv"
@@ -15,8 +14,7 @@ import (
 	btc "github.com/conformal/btcwire"
 )
 
-var btcnet = btc.MainNet
-var pver = btc.ProtocolVersion
+var btcnet = btc.TestNet3
 
 type Node struct {
 	Addr      btc.NetAddress
@@ -28,14 +26,13 @@ type Node struct {
 type LogLevel int
 
 const (
-	//Lower case
-	ERROR LogLevel = iota
-	WARN
-	INFO
-	LOG
+	Error LogLevel = iota
+	Warn
+	Info
+	Log
 )
 
-var LEVEL = INFO
+var Level = Info
 var logger = log.New(os.Stdout, "", log.Ltime)
 
 var outFile = flag.String("o", "run.json", "File to dump json into")
@@ -53,40 +50,45 @@ func connHandler(id int, outAddrs chan<- []*btc.NetAddress, outNode chan<- Node,
 		addr := <-inAddr
 		strA := addressFmt(*addr)
 
-		threadLog := func(level LogLevel, msg string) {
-			if level <= LEVEL {
+		threadLog := func(reported LogLevel, msg string) {
+			if reported <= Level {
 				logger.Printf("[%d] %s: %s\n", id, strA, msg)
 			}
 		}
-		write := composeWrite(threadLog)
+		connProtoVer := btc.ProtocolVersion
+		write := composeWrite(threadLog, connProtoVer)
 
 		conn, err := net.DialTimeout("tcp", strA, time.Millisecond*500)
 		if err != nil {
-			threadLog(LOG, err.Error())
+			threadLog(Log, err.Error())
 			continue
 		}
-		threadLog(INFO, "Connected")
+		threadLog(Info, "Connected")
 
-                // TODO notice block height
-		ver_m, _ := btc.NewMsgVersionFromConn(conn, genNonce(), 258823)
+		ver_m, _ := btc.NewMsgVersionFromConn(conn, genNonce(), 0)
 		ver_m.AddUserAgent("btcmonitor", "0.0.1")
 		write(conn, ver_m)
 
 		// We are looking for successful addr messages
 		wins := 0
-		// After 6 seconds we just close the conn and handle errors
-		time.AfterFunc(time.Second*15, func() { conn.Close() })
+		// After 10 seconds we just close the conn and handle errors
+		time.AfterFunc(time.Second*10, func() { conn.Close() })
 	MessageLoop:
 		for {
 			var resp btc.Message
-			resp, _, err := btc.ReadMessage(conn, pver, btcnet)
+			resp, _, err := btc.ReadMessage(conn, connProtoVer, btcnet)
 			if err != nil {
-				threadLog(LOG, err.Error())
+				threadLog(Log, err.Error())
 				break MessageLoop
 			}
-			threadLog(INFO, resp.Command())
+			threadLog(Info, resp.Command())
 			switch resp := resp.(type) {
 			case *btc.MsgVersion:
+				nodePVer := uint32(resp.ProtocolVersion)
+				if nodePVer < connProtoVer {
+					connProtoVer = nodePVer
+					write = composeWrite(threadLog, connProtoVer)
+				}
 				node := convNode(*addr, *resp)
 				outNode <- node
 				verack := btc.NewMsgVerAck()
@@ -97,7 +99,7 @@ func connHandler(id int, outAddrs chan<- []*btc.NetAddress, outNode chan<- Node,
 				wins += 1
 				addrs := resp.AddrList
 				outAddrs <- addrs
-				if wins == 1 {
+				if wins == 3 {
 					break MessageLoop
 				}
 			case *btc.MsgPing:
@@ -126,8 +128,7 @@ func main() {
 	numWorkers := 250
 	// Multiplex writes into single channel
 	var incomingAddrs = make(chan []*btc.NetAddress)
-	//fewer allocations
-	var outgoingAddr = make(chan *btc.NetAddress, 5000000)
+	var outgoingAddr = make(chan *btc.NetAddress, 5e5)
 	var liveNodes = make(chan Node)
 
 	for i := 0; i < numWorkers; i += 1 {
@@ -136,8 +137,7 @@ func main() {
 
 	rt := time.Duration(*runTime)
 	timer := time.NewTimer(time.Second * rt)
-	// empty struct {}
-	var visited = make(map[string]bool)
+	var visited = make(map[string]struct{})
 	var addrs []*btc.NetAddress
 	var node Node
 	cnt := 0
@@ -146,9 +146,9 @@ func main() {
 	pair := strings.Split(*bootstrap, ":")
 	ip := pair[0]
 	port, _ := strconv.ParseUint(pair[1], 10, 16)
-	home := btc.NetAddress{time.Now(), *new(btc.ServiceFlag), net.ParseIP(ip), uint16(port)}
+	home := btc.NewNetAddressIPPort(net.ParseIP(ip), uint16(port), 0)
 	// Give first goroutine something to do :)
-	outgoingAddr <- &home
+	outgoingAddr <- home
 
 MainLoop:
 	for {
@@ -165,7 +165,8 @@ MainLoop:
 					cnt += 1
 					outgoingAddr <- addr
 				}
-				visited[key] = true
+				// empty struct
+				visited[key] = struct{}{}
 			}
 		case node = <-liveNodes:
 			addrMap[key(node)] = node
@@ -183,7 +184,7 @@ MainLoop:
 
 // utility functions
 func addressFmt(addr btc.NetAddress) string {
-	// buffer copy
+
 	return addr.IP.String() + ":" + strconv.Itoa(int(addr.Port))
 }
 
@@ -191,31 +192,33 @@ func key(node Node) string {
 	return addressFmt(node.Addr)
 }
 
-func composeWrite(threadLog func(LogLevel, string)) func(net.Conn, btc.Message) {
+func composeWrite(threadLog func(LogLevel, string), pver uint32) func(net.Conn, btc.Message) {
 	// creates a write function with logging in a closure
 	return func(conn net.Conn, msg btc.Message) {
 		err := btc.WriteMessage(conn, msg, pver, btcnet)
 		if err != nil {
-			threadLog(INFO, err.Error())
+			threadLog(Info, err.Error())
 		}
 	}
 }
 
 func convNode(addr btc.NetAddress, ver btc.MsgVersion) Node {
-	n := Node{addr,
-		ver.ProtocolVersion,
-		ver.UserAgent,
-		ver.Services,
+	n := Node{
+		Addr:      addr,
+		Version:   ver.ProtocolVersion,
+		UserAgent: ver.UserAgent,
+		Services:  ver.Services,
 	}
 	return n
 }
 
 func genNonce() uint64 {
-	return uint64(rand.Int63())
+	n, _ := btc.RandomUint64()
+	return n
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, "usage: span [filename]\n")
+	fmt.Fprintf(os.Stderr, "usage: span [options]\n")
 	flag.PrintDefaults()
 	os.Exit(2)
 }
