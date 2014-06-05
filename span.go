@@ -15,7 +15,7 @@ import (
 	btc "github.com/conformal/btcwire"
 )
 
-var btcnet = btc.TestNet3
+var btcnet = btc.MainNet
 var pver = btc.ProtocolVersion
 
 type Node struct {
@@ -28,6 +28,7 @@ type Node struct {
 type LogLevel int
 
 const (
+	//Lower case
 	ERROR LogLevel = iota
 	WARN
 	INFO
@@ -124,6 +125,7 @@ func main() {
 	numWorkers := 250
 	// Multiplex writes into single channel
 	var incomingAddrs = make(chan []*btc.NetAddress)
+	//fewer allocations
 	var outgoingAddr = make(chan *btc.NetAddress, 5000000)
 	var liveNodes = make(chan Node)
 
@@ -133,6 +135,7 @@ func main() {
 
 	rt := time.Duration(*runTime)
 	timer := time.NewTimer(time.Second * rt)
+	// empty struct {}
 	var visited = make(map[string]bool)
 	var addrs []*btc.NetAddress
 	var node Node
@@ -179,6 +182,7 @@ MainLoop:
 
 // utility functions
 func addressFmt(addr btc.NetAddress) string {
+	// buffer copy
 	return addr.IP.String() + ":" + strconv.Itoa(int(addr.Port))
 }
 
